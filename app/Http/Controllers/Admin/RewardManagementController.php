@@ -62,6 +62,7 @@ class RewardManagementController extends Controller
                 'rewards.earned_at',
                 'rewards.delivered_at as reward_delivered_at',
                 'progress.task_snapshot',
+                'progress.reward_campaign_task_id',
                 'campaigns.name as campaign_name',
                 'campaigns.environment',
                 'devices.id as device_id',
@@ -94,6 +95,14 @@ class RewardManagementController extends Controller
                 512,
                 JSON_THROW_ON_ERROR
             );
+
+            $currentTask = DB::table('reward_campaign_tasks')
+                ->where('id', $reward->reward_campaign_task_id)
+                ->value('title');
+
+            if ($currentTask !== null) {
+                $reward->task['title'] = $currentTask;
+            }
 
             $reward->bundle = $reward->redeemed_bundle
                 ? json_decode(
@@ -245,6 +254,7 @@ class RewardManagementController extends Controller
             ->select([
                 'progress.id',
                 'progress.task_snapshot',
+                'progress.reward_campaign_task_id',
                 'progress.progress_count',
                 'progress.completed_at',
                 'campaigns.name as campaign_name',
@@ -265,6 +275,14 @@ class RewardManagementController extends Controller
                 512,
                 JSON_THROW_ON_ERROR
             );
+
+            $currentTask = DB::table('reward_campaign_tasks')
+                ->where('id', $item->reward_campaign_task_id)
+                ->value('title');
+
+            if ($currentTask !== null) {
+                $item->task['title'] = $currentTask;
+            }
         }
 
         return view('admin.devices.show', compact(

@@ -138,11 +138,58 @@ class RewardRedemptionService
                 ];
             }
 
+            
             if ($lockedReward->status !== 'earned') {
                 $this->invalid('This reward is not available for redemption.');
             }
 
+            // Prevent another device from claiming this phone number.
+            $this->assertPhoneAvailable($deviceId, $phone);
+
             $now = now();
+
+            
+            // Reserve the phone number. The unique phone_hash index
+            // prevents two different devices from reserving the same number.
+            try {
+                DB::table('reward_device_phone_numbers')->insert([
+                    'reward_device_id' => $deviceId,
+                    'phone_hash' => $this->phoneHash($phone),
+                    'network' => $network,
+                    'phone_last4' => substr($phone, -4),
+                    'bound_at' => null,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            } catch (\Illuminate\Database\QueryException $exception) {
+                // Re-read the owner after a duplicate-key or concurrent insert.
+                $owner = DB::table('reward_device_phone_numbers')
+                    ->where('phone_hash', $this->phoneHash($phone))
+                    ->first();
+
+                // Re-throw unrelated database errors.
+                if (! $owner) {
+                    throw $exception;
+                }
+
+                // Never allow another device to use this number.
+                if ((int) $owner->reward_device_id !== $deviceId) {
+                    abort(
+                        409,
+                        'This phone number is already assigned to another device.'
+                    );
+                }
+
+                // This device already owns the number, so it can reuse it.
+                if ($owner->network !== $network) {
+                    abort(
+                        409,
+                        'This phone number is already registered to a different network.'
+                    );
+                }
+            }
+
+
 
             $requestId = CarbonImmutable::now('Africa/Lagos')
                 ->format('YmdHi')
@@ -338,7 +385,55 @@ class RewardRedemptionService
                     'delivered_at' => $delivered ? $now : null,
                     'updated_at' => $now,
                 ]);
+
+                if ($delivered) {
+                    $ownerDeviceId = DB::table('reward_entitlements as e')
+                        ->join(
+                            'reward_task_progress as p',
+                            'p.id',
+                            '=',
+                            'e.reward_task_progress_id'
+                        )
+                        ->join(
+                            'reward_participants as rp',
+                            'rp.id',
+                            '=',
+                            'p.reward_participant_id'
+                        )
+                        ->where('e.id', $redemption->reward_entitlement_id)
+                        ->value('rp.reward_device_id');
+
+                    $phoneHash = $this->phoneHash($redemption->phone);
+
+                    $phoneReservation = DB::table('reward_device_phone_numbers')
+                        ->where('phone_hash', $phoneHash)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if (
+                        ! $phoneReservation ||
+                        $ownerDeviceId === null ||
+                        (int) $phoneReservation->reward_device_id !== (int) $ownerDeviceId ||
+                        $phoneReservation->network !== $redemption->network
+                    ) {
+                        throw new \RuntimeException(
+                            'Phone reservation does not match the redemption device and network.'
+                        );
+                    }
+
+                    DB::table('reward_device_phone_numbers')
+                        ->where('phone_hash', $phoneHash)
+                        ->where('reward_device_id', $ownerDeviceId)
+                        ->where('network', $redemption->network)
+                        ->whereNull('bound_at')
+                        ->update([
+                            'bound_at' => $now,
+                            'updated_at' => $now,
+                        ]);
+                }
+
         }, 3);
+        
     }
 
     private function ownedReward(int $deviceId, string $rewardId): object
@@ -375,6 +470,32 @@ class RewardRedemptionService
 
         return $reward;
     }
+
+
+    private function phoneHash(string $phone): string
+    {
+        // The controller normalizes Nigerian numbers to 080... format.
+        return hash('sha256', $phone);
+    }
+
+    private function assertPhoneAvailable(
+        int $deviceId,
+        string $phone
+    ): void {
+        $hash = $this->phoneHash($phone);
+
+        $owner = DB::table('reward_device_phone_numbers')
+            ->where('phone_hash', $hash)
+            ->first();
+
+        if ($owner && (int) $owner->reward_device_id !== $deviceId) {
+            abort(
+                409,
+                'This phone number is already assigned to another rewards device.'
+            );
+        }
+    }
+
 
     private function checkDestination(
         object $redemption,

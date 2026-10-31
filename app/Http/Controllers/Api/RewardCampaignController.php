@@ -13,11 +13,14 @@ class RewardCampaignController extends Controller
         Request $request,
         RewardCampaignService $service
     ) {
+        
         $campaigns = DB::table('reward_campaigns')
             ->where('environment', config('vtpass.environment'))
             ->where('status', 'active')
+            ->where('show_in_app', true)
             ->orderByDesc('id')
             ->paginate(10);
+
 
         $items = [];
 
@@ -80,7 +83,7 @@ class RewardCampaignController extends Controller
                 'campaigns.status',
             ])
             ->orderByDesc('participants.id')
-            ->paginate(10);
+            ->get();
 
         $items = [];
 
@@ -104,12 +107,10 @@ class RewardCampaignController extends Controller
 
             foreach ($progressRows as $progress) {
                 $rewards = DB::table('reward_entitlements')
-                    ->where(
-                        'reward_task_progress_id',
-                        $progress->id
-                    )
+                    ->where('reward_task_progress_id', $progress->id)
                     ->orderBy('id')
                     ->get([
+                        'id',
                         'public_id',
                         'status',
                         'max_cost_kobo',
@@ -117,12 +118,35 @@ class RewardCampaignController extends Controller
                         'delivered_at',
                     ])
                     ->map(function ($reward) {
+                        $redemption = DB::table('reward_redemptions')
+                            ->where('reward_entitlement_id', $reward->id)
+                            ->first([
+                                'network',
+                                'bundle_snapshot',
+                                'status',
+                                'submitted_at',
+                                'delivered_at',
+                            ]);
+
                         return [
                             'reward_id' => $reward->public_id,
                             'status' => $reward->status,
                             'max_cost_kobo' => (int) $reward->max_cost_kobo,
                             'earned_at' => $reward->earned_at,
                             'delivered_at' => $reward->delivered_at,
+
+                            'redemption' => $redemption ? [
+                                'network' => $redemption->network,
+                                'bundle' => json_decode(
+                                    $redemption->bundle_snapshot,
+                                    true,
+                                    512,
+                                    JSON_THROW_ON_ERROR
+                                ),
+                                'status' => $redemption->status,
+                                'submitted_at' => $redemption->submitted_at,
+                                'delivered_at' => $redemption->delivered_at,
+                            ] : null,
                         ];
                     })
                     ->values();
@@ -167,8 +191,6 @@ class RewardCampaignController extends Controller
 
         return response()->json([
             'enrolments' => $items,
-            'current_page' => $participants->currentPage(),
-            'last_page' => $participants->lastPage(),
         ]);
     }
 

@@ -231,11 +231,18 @@ class DeviceAdminController extends Controller
             ->whereIn('credits.reward_referral_id', $referralIds)
             ->where('participants.reward_device_id', $device)
             ->where('campaigns.environment', $environment)
+            ->leftJoin(
+                'reward_campaign_tasks as current_tasks',
+                'current_tasks.id',
+                '=',
+                'progress.reward_campaign_task_id'
+            )
             ->select([
                 'credits.reward_referral_id',
                 'credits.qualified_at',
                 'campaigns.name as campaign_name',
                 'progress.task_snapshot',
+                'current_tasks.title as current_task_title',
             ])
             ->get();
 
@@ -246,6 +253,10 @@ class DeviceAdminController extends Controller
                 512,
                 JSON_THROW_ON_ERROR
             );
+
+            if ($credit->current_task_title !== null) {
+                $credit->task['title'] = $credit->current_task_title;
+            }
         }
 
         $creditsByReferral = $credits->groupBy('reward_referral_id');
@@ -359,6 +370,7 @@ class DeviceAdminController extends Controller
             );
     }
 
+    
     private function progressQuery(): Builder
     {
         return DB::table('reward_task_progress as progress')
@@ -373,6 +385,12 @@ class DeviceAdminController extends Controller
                 'campaigns.id',
                 '=',
                 'participants.reward_campaign_id'
+            )
+            ->leftJoin(
+                'reward_campaign_tasks as current_tasks',
+                'current_tasks.id',
+                '=',
+                'progress.reward_campaign_task_id'
             )
             ->leftJoin(
                 'reward_entitlements as rewards',
@@ -390,11 +408,14 @@ class DeviceAdminController extends Controller
                 'campaigns.id as campaign_id',
                 'campaigns.name as campaign_name',
                 'campaigns.status as campaign_status',
+                'current_tasks.title as current_task_title',
                 'rewards.public_id as reward_id',
                 'rewards.status as reward_status',
             ]);
     }
 
+
+    
     private function decodeTasks(Collection $rows): void
     {
         foreach ($rows as $item) {
@@ -405,9 +426,14 @@ class DeviceAdminController extends Controller
                 JSON_THROW_ON_ERROR
             );
 
+            // Display the current title when the original task still exists.
+            if ($item->current_task_title !== null) {
+                $item->task['title'] = $item->current_task_title;
+            }
+
             $item->target = max(
                 1,
-                (int) $item->task['target_count']
+                (int) ($item->task['target_count'] ?? 1)
             );
 
             $item->percentage = min(
@@ -419,4 +445,5 @@ class DeviceAdminController extends Controller
             );
         }
     }
+
 }

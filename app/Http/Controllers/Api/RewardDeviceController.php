@@ -50,12 +50,27 @@ class RewardDeviceController extends Controller
         ) {
             $now = now();
 
+            // Generate a unique 6-character alphanumeric referral code.
+            $characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+            do {
+                $referralCode = '';
+
+                for ($i = 0; $i < 6; $i++) {
+                    $referralCode .= $characters[
+                        random_int(0, strlen($characters) - 1)
+                    ];
+                }
+            } while (
+                DB::table('reward_devices')
+                    ->where('referral_code', $referralCode)
+                    ->exists()
+            );
+
             $inserted = DB::table('reward_devices')->insertOrIgnore([
                 'public_id' => (string) Str::uuid(),
                 'device_key_hash' => $deviceHash,
-                'referral_code' => 'ST'.strtoupper(
-                    bin2hex(random_bytes(6))
-                ),
+                'referral_code' => $referralCode,
                 'api_token_hash' => null,
                 'token_expires_at' => null,
                 'first_seen_at' => $now,

@@ -34,6 +34,21 @@ Route::prefix('admin')->name('admin.')->group(function () {
             ->name('campaigns.store');
 
         Route::get(
+            '/campaigns/{campaign}/edit',
+            [CampaignController::class, 'edit']
+        )
+            ->whereNumber('campaign')
+            ->name('campaigns.edit');
+
+        Route::put(
+            '/campaigns/{campaign}',
+            [CampaignController::class, 'update']
+        )
+            ->whereNumber('campaign')
+            ->middleware('throttle:10,1')
+            ->name('campaigns.update');    
+
+        Route::get(
             '/bundles/{network}',
             [CampaignController::class, 'bundles']
         )
@@ -47,6 +62,16 @@ Route::prefix('admin')->name('admin.')->group(function () {
         )
             ->whereNumber('campaign')
             ->name('campaigns.activate');
+
+        
+        Route::post(
+            '/campaigns/{campaign}/visibility',
+            [CampaignController::class, 'toggleVisibility']
+        )
+            ->whereNumber('campaign')
+            ->middleware('throttle:30,1')
+            ->name('campaigns.visibility');
+    
             
         Route::get(
             '/rewards',
