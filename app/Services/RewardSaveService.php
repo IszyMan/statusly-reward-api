@@ -175,17 +175,29 @@ class RewardSaveService
                     );
                 }
 
-                
                 /*
-                 * One-time tasks remain complete permanently.
-                 * Recurring tasks prepare a new cycle after completion.
+                 * One-time tasks stay complete.
+                 * Recurring tasks have their next cycle scheduled at completion.
+                 * Older completed cycles are supported for compatibility.
                  */
                 if ($cycle->completed_at !== null) {
                     if ($frequencyDays === null) {
                         continue;
                     }
 
+                    $frequencyDays = (int) $frequencyDays;
+
+                    if ($frequencyDays <= 0) {
+                        throw new \RuntimeException(
+                            'Invalid recurring task frequency.'
+                        );
+                    }
+
                     $nextCycleNumber = $currentCycleNumber + 1;
+
+                    $nextAvailableAt = CarbonImmutable::parse(
+                        $cycle->completed_at
+                    )->addDays($frequencyDays);
 
                     $nextCycle = DB::table('reward_task_cycles')
                         ->where('reward_task_progress_id', $progress->id)
@@ -193,11 +205,12 @@ class RewardSaveService
                         ->lockForUpdate()
                         ->first();
 
+                    /*
+                     * Legacy fallback:
+                     * Create a missing successor for older completed cycles.
+                     * Never credit a save before the successor is eligible.
+                     */
                     if (! $nextCycle) {
-                        $nextAvailableAt = CarbonImmutable::parse(
-                            $cycle->completed_at
-                        )->addDays((int) $frequencyDays);
-
                         $nextCycleId = DB::table('reward_task_cycles')
                             ->insertGetId([
                                 'reward_task_progress_id' => $progress->id,
@@ -216,6 +229,10 @@ class RewardSaveService
                             ->first();
                     }
 
+                    /*
+                     * Cooldown:
+                     * Saves received before next_available_at cannot count.
+                     */
                     if (
                         $nextCycle->next_available_at === null
                         || CarbonImmutable::parse(
@@ -226,8 +243,8 @@ class RewardSaveService
                     }
 
                     /*
-                     * Reserve the next cycle's reward before allowing
-                     * progress. Never begin an unfunded reward cycle.
+                     * Budget protection:
+                     * Do not start a new cycle unless its reward is funded.
                      */
                     $rewardCost = (int) $task['max_reward_cost_kobo'];
 
@@ -240,15 +257,19 @@ class RewardSaveService
 
                     DB::table('reward_campaigns')
                         ->where('id', $campaign->id)
-                        ->increment('allocated_budget_kobo', $rewardCost, [
-                            'updated_at' => $now,
-                        ]);
+                        ->increment(
+                            'allocated_budget_kobo',
+                            $rewardCost,
+                            ['updated_at' => $now]
+                        );
 
                     DB::table('reward_participants')
                         ->where('id', $progress->participant_id)
-                        ->increment('reserved_budget_kobo', $rewardCost, [
-                            'updated_at' => $now,
-                        ]);
+                        ->increment(
+                            'reserved_budget_kobo',
+                            $rewardCost,
+                            ['updated_at' => $now]
+                        );
 
                     $campaign->allocated_budget_kobo =
                         (int) $campaign->allocated_budget_kobo + $rewardCost;
@@ -274,13 +295,11 @@ class RewardSaveService
                     $cycle = DB::table('reward_task_cycles')
                         ->where('id', $nextCycle->id)
                         ->first();
-
-                    $progress->cycle_number = $nextCycleNumber;
-                    $progress->progress_count = 0;
-                    $progress->completed_at = null;
                 }
 
-
+                /*
+                 * A completed cycle must never accept additional credits.
+                 */
                 if (
                     (int) $cycle->progress_count >= $target
                     || $cycle->completed_at !== null
@@ -288,6 +307,9 @@ class RewardSaveService
                     continue;
                 }
 
+                /*
+                 * Credit this unique media save to the active cycle.
+                 */
                 DB::table('reward_save_credits')->insert([
                     'reward_task_progress_id' => $progress->id,
                     'reward_task_cycle_id' => $cycle->id,
@@ -324,6 +346,12 @@ class RewardSaveService
                     'completed' => $completed,
                 ];
 
+                /*
+                 * When the target is reached:
+                 * 1. Create the earned reward.
+                 * 2. Schedule the next recurring cycle immediately.
+                 * 3. Do not reserve the next cycle's budget yet.
+                 */
                 if ($completed) {
                     $rewardId = (string) Str::uuid();
 
@@ -347,6 +375,34 @@ class RewardSaveService
                         'cycle_number' => $currentCycleNumber,
                         'status' => 'earned',
                     ];
+
+                    /*
+                     * Once: no successor.
+                     * Daily: +1 day.
+                     * Every 3 days: +3 days.
+                     * Weekly: +7 days.
+                     */
+                    if ($frequencyDays !== null) {
+                        $frequencyDays = (int) $frequencyDays;
+
+                        if ($frequencyDays <= 0) {
+                            throw new \RuntimeException(
+                                'Invalid recurring task frequency.'
+                            );
+                        }
+
+                        DB::table('reward_task_cycles')->insertOrIgnore([
+                            'reward_task_progress_id' => $progress->id,
+                            'cycle_number' => $currentCycleNumber + 1,
+                            'progress_count' => 0,
+                            'started_at' => null,
+                            'completed_at' => null,
+                            'next_available_at' => CarbonImmutable::parse($now)
+                                ->addDays($frequencyDays),
+                            'created_at' => $now,
+                            'updated_at' => $now,
+                        ]);
+                    }
                 }
             }
 

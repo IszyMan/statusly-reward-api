@@ -3,21 +3,30 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\RewardReferralService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use RuntimeException;
 
 class RewardDeviceController extends Controller
 {
-    public function register(Request $request)
-    {
+    public function register(
+        Request $request,
+        RewardReferralService $referrals
+    ) {
         $data = $request->validate([
             'android_id' => [
                 'required',
                 'string',
                 'regex:/^[a-fA-F0-9]{16}$/',
                 'not_in:0000000000000000',
+            ],
+            'install_referral_code' => [
+                'nullable',
+                'string',
+                'regex:/^[a-zA-Z0-9]{6}$/',
             ],
         ]);
 
@@ -37,6 +46,10 @@ class RewardDeviceController extends Controller
             $hashKey
         );
 
+        $installReferralCode = strtoupper(
+            trim((string) ($data['install_referral_code'] ?? ''))
+        );
+
         $token = bin2hex(random_bytes(32));
 
         $expiresAt = now()->addHours(
@@ -46,11 +59,12 @@ class RewardDeviceController extends Controller
         $result = DB::transaction(function () use (
             $deviceHash,
             $token,
-            $expiresAt
+            $expiresAt,
+            $installReferralCode,
+            $referrals
         ) {
             $now = now();
 
-            // Generate a unique 6-character alphanumeric referral code.
             $characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
             do {
@@ -91,7 +105,48 @@ class RewardDeviceController extends Controller
             }
 
             if ($device->blocked_at !== null) {
-                abort(403, 'Rewards access is unavailable for this device.');
+                abort(
+                    403,
+                    'Rewards access is unavailable for this device.'
+                );
+            }
+
+            $attribution = [
+                'status' => 'none',
+                'claimed' => false,
+            ];
+
+            if ($installReferralCode !== '') {
+                try {
+                    // Record attribution only.
+                    // Qualification remains in the existing save flow.
+                    $claim = $referrals->claim(
+                        (int) $device->id,
+                        $installReferralCode
+                    );
+
+                    $attribution = [
+                        'status' => 'attributed',
+                        'claimed' => (bool) ($claim['claimed'] ?? false),
+                        'already_claimed' => (bool) (
+                            $claim['already_claimed'] ?? false
+                        ),
+                    ];
+                } catch (ValidationException $exception) {
+                    // An invalid or ineligible referral must not prevent
+                    // normal device registration.
+                    //
+                    // The claim service retains its existing rules:
+                    // no self-referral, no replacement attribution,
+                    // and no claim after saves or campaign enrolment.
+                    $attribution = [
+                        'status' => 'rejected',
+                        'claimed' => false,
+                        'message' => collect($exception->errors())
+                            ->flatten()
+                            ->first() ?? 'Referral attribution was rejected.',
+                    ];
+                }
             }
 
             DB::table('reward_devices')
@@ -109,13 +164,15 @@ class RewardDeviceController extends Controller
                     'referral_code' => $device->referral_code,
                 ],
                 'new_device' => $inserted === 1,
+                'referral_attribution' => $attribution,
             ];
         }, 3);
 
         return response()->json([
-            'environment' => 'sandbox',
+            'environment' => config('vtpass.environment'),
             'device' => $result['device'],
             'new_device' => $result['new_device'],
+            'referral_attribution' => $result['referral_attribution'],
             'token' => $token,
             'token_expires_at' => $expiresAt->toIso8601String(),
         ]);
@@ -132,7 +189,7 @@ class RewardDeviceController extends Controller
             ]);
 
         return response()->json([
-            'environment' => 'sandbox',
+            'environment' => config('vtpass.environment'),
             'device' => [
                 'id' => $device->public_id,
                 'referral_code' => $device->referral_code,

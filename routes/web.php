@@ -6,6 +6,7 @@ use App\Http\Middleware\EnsureRewardAdmin;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Admin\RewardManagementController;
 use App\Http\Controllers\Admin\DeviceAdminController;
+use App\Http\Controllers\Admin\CampaignPopupController;
 
 Route::get('/', function () {
     return view('welcome');
@@ -103,7 +104,39 @@ Route::prefix('admin')->name('admin.')->group(function () {
             [DeviceAdminController::class, 'reset']
         )
             ->whereNumber('device')
-            ->name('devices.reset');   
+            ->name('devices.reset'); 
+            
+        Route::get(
+            '/popups',
+            [CampaignPopupController::class, 'index']
+        )->name('popups.index');
+
+        Route::get(
+            '/popups/create',
+            [CampaignPopupController::class, 'create']
+        )->name('popups.create');
+
+        Route::post(
+            '/popups',
+            [CampaignPopupController::class, 'store']
+        )
+            ->middleware('throttle:10,1')
+            ->name('popups.store');
+
+        Route::get(
+            '/popups/{popup}/edit',
+            [CampaignPopupController::class, 'edit']
+        )
+            ->whereNumber('popup')
+            ->name('popups.edit');
+
+        Route::put(
+            '/popups/{popup}',
+            [CampaignPopupController::class, 'update']
+        )
+            ->whereNumber('popup')
+            ->middleware('throttle:10,1')
+            ->name('popups.update');   
 
         Route::post('/logout', [AdminController::class, 'logout'])
             ->name('logout');

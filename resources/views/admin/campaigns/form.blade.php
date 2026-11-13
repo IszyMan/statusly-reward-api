@@ -24,6 +24,7 @@
             'type' => 'referrals',
             'target_count' => 3,
             'media_type' => 'all',
+            'frequency_days' => 'once',
             'source' => 'all',
             'referral_saves' => 2,
             'reward_ceiling_naira' => '100',
@@ -176,66 +177,7 @@
             limit on the app.
         </small>
 
-        <h3 style="margin-top: 24px;">Referral credit limits</h3>
-
-        <p class="help">
-            Control how many qualified referrals each inviter can receive
-            credit for during a selected period. Referrals above the limit
-            remain queued for later processing.
-        </p>
-
-        <div class="row">
-            <div>
-                <label for="referral-credit-limit">
-                    Maximum credited referrals
-                </label>
-
-                <input
-                    id="referral-credit-limit"
-                    name="referral_credit_limit"
-                    type="number"
-                    min="1"
-                    max="100000"
-                    step="1"
-                    value="{{ old(
-                        'referral_credit_limit',
-                        $campaign->referral_credit_limit ?? 15
-                    ) }}"
-                    required
-                >
-            </div>
-
-            <div>
-                <label for="referral-credit-period">Limit period</label>
-
-                @php
-                    $selectedPeriod = old(
-                        'referral_credit_period',
-                        $campaign->referral_credit_period ?? 'daily'
-                    );
-                @endphp
-
-                <select
-                    id="referral-credit-period"
-                    name="referral_credit_period"
-                    required
-                >
-                    <option
-                        value="daily"
-                        @selected($selectedPeriod === 'daily')
-                    >
-                        Per day
-                    </option>
-
-                    <option
-                        value="weekly"
-                        @selected($selectedPeriod === 'weekly')
-                    >
-                        Per week
-                    </option>
-                </select>
-            </div>
-        </div>
+        
 
         <details
             style="margin-top: 20px;"
@@ -361,6 +303,7 @@
 </form>
 
 
+
 <template id="task-template">
     <section class="card task-card" data-task>
         @if ($isEditing && $hasParticipants)
@@ -442,8 +385,12 @@
             </select>
 
             <small class="help">
-                Each new cycle requires fresh qualifying saves.
-                Previous saves must not count towards the next cycle.
+                A new reward cycle becomes available after the selected
+                waiting period, starting from the previous cycle's completion.
+
+                Each cycle requires fresh qualifying activity.
+                Saves and referrals from previous cycles or during
+                the waiting period do not carry over.
             </small>
         </div>
 
@@ -794,7 +741,7 @@
 
             referralFields.hidden = !isReferralTask;
             referralSavesInput.required = isReferralTask;
-            frequencyFields.hidden = isReferralTask;
+            frequencyFields.hidden = false;
         }
 
         typeInput.addEventListener('change', updateTaskType);

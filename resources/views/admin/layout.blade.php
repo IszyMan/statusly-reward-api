@@ -596,6 +596,17 @@
 
 
                 <a
+                    href="{{ route('admin.popups.index') }}"
+                    class="{{ request()->routeIs('admin.popups.*') ? 'active' : '' }}"
+                    @if (request()->routeIs('admin.popups.*'))
+                        aria-current="page"
+                    @endif
+                >
+                    Popups
+                </a>
+
+
+                <a
                     href="{{ route('admin.rewards.index') }}"
                     class="{{ request()->routeIs('admin.rewards.*') ? 'active' : '' }}"
                     @if (request()->routeIs('admin.rewards.*'))

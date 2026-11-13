@@ -167,17 +167,6 @@ class CampaignController extends Controller
 
             'audience' => ['required', 'in:all,new_devices'],
 
-            'referral_credit_limit' => [
-                'required',
-                'integer',
-                'min:1',
-                'max:100000',
-            ],
-
-            'referral_credit_period' => [
-                'required',
-                'in:daily,weekly',
-            ],
 
             'starts_at' => [
                 'nullable',
@@ -403,8 +392,7 @@ class CampaignController extends Controller
                     : null,
 
                 'bundles' => $selectedBundles,
-                'frequency_days' => $task['type'] === 'save_media'
-                    && ($task['frequency_days'] ?? 'once') !== 'once'
+                'frequency_days' => ($task['frequency_days'] ?? 'once') !== 'once'
                     ? (int) $task['frequency_days']
                     : null,
             ];
@@ -440,9 +428,7 @@ class CampaignController extends Controller
                 'terms' => $data['terms'] ?? null,
                 'environment' => config('vtpass.environment'),
                 'status' => 'draft',
-                'audience' => $data['audience'],                
-                'referral_credit_limit' => (int) $data['referral_credit_limit'],
-                'referral_credit_period' => $data['referral_credit_period'],
+                'audience' => $data['audience'],
                 'budget_kobo' => $budgetKobo,
                 'allocated_budget_kobo' => 0,
                 'participant_limit' => $data['participant_limit'],
@@ -511,10 +497,7 @@ class CampaignController extends Controller
                 'required', 'integer', 'min:1', 'max:2147483647',
             ],
             'audience' => ['required', 'in:all,new_devices'],
-            'referral_credit_limit' => [
-                'required', 'integer', 'min:1', 'max:100000',
-            ],
-            'referral_credit_period' => ['required', 'in:daily,weekly'],
+
             'starts_at' => ['nullable', 'date_format:Y-m-d\TH:i'],
             'enrollment_closes_at' => [
                 'nullable', 'date_format:Y-m-d\TH:i',
@@ -748,8 +731,7 @@ class CampaignController extends Controller
                         ], JSON_THROW_ON_ERROR)
                         : null,
                     'bundles' => $selectedBundles,
-                    'frequency_days' => $task['type'] === 'save_media'
-                        && ($task['frequency_days'] ?? 'once') !== 'once'
+                    'frequency_days' => ($task['frequency_days'] ?? 'once') !== 'once'
                         ? (int) $task['frequency_days']
                         : null,
                 ];
@@ -809,8 +791,6 @@ class CampaignController extends Controller
                     'description' => $data['description'] ?? null,
                     'terms' => $data['terms'] ?? null,
                     'audience' => $data['audience'],
-                    'referral_credit_limit' => (int) $data['referral_credit_limit'],
-                    'referral_credit_period' => $data['referral_credit_period'],
                     'budget_kobo' => $budgetKobo,
                     'participant_limit' => (int) $data['participant_limit'],
                     'starts_at' => $startsAt,

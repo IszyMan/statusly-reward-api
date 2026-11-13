@@ -344,13 +344,9 @@ class RewardCampaignService
                 'title' => $task->title,
                 'type' => $task->type,
                 'target_count' => (int) $task->target_count,
-                'frequency_days' => $task->type === 'save_media'
-                    ? (
-                        $task->frequency_days === null
-                            ? null
-                            : (int) $task->frequency_days
-                    )
-                    : null,
+                'frequency_days' => $task->frequency_days === null
+                    ? null
+                    : (int) $task->frequency_days,
                 'media_type' => $task->media_type,
                 'source' => $task->source,
                 'qualification_rules' => $rules,

@@ -9,12 +9,18 @@ use Illuminate\Validation\ValidationException;
 
 class RewardReferralService
 {
-    
+    /*
+    |--------------------------------------------------------------------------
+    | Claim Referral Code
+    |--------------------------------------------------------------------------
+    */
+
     public function claim(int $deviceId, string $code): array
     {
         $code = strtoupper(trim($code));
 
         return DB::transaction(function () use ($deviceId, $code) {
+
             $inviter = DB::table('reward_devices')
                 ->where('referral_code', $code)
                 ->first();
@@ -37,7 +43,11 @@ class RewardReferralService
             $device = $devices->get($deviceId);
             $inviter = $devices->get($inviter->id);
 
-            abort_unless($device && $inviter, 404, 'Device unavailable.');
+            abort_unless(
+                $device && $inviter,
+                404,
+                'Device unavailable.'
+            );
 
             if (
                 $device->blocked_at !== null
@@ -49,8 +59,6 @@ class RewardReferralService
                     'This device cannot participate in referrals.'
                 );
             }
-            
-
 
             $existing = DB::table('reward_referrals')
                 ->where('invited_device_id', $deviceId)
@@ -78,15 +86,15 @@ class RewardReferralService
                 );
             }
 
-            $hasSaved = DB::table('reward_saved_media')
-                ->where('reward_device_id', $deviceId)
-                ->exists();
-
-            $hasEnrolled = DB::table('reward_participants')
-                ->where('reward_device_id', $deviceId)
-                ->exists();
-
-            if ($hasSaved || $hasEnrolled) {
+            if (
+                DB::table('reward_saved_media')
+                    ->where('reward_device_id', $deviceId)
+                    ->exists()
+                ||
+                DB::table('reward_participants')
+                    ->where('reward_device_id', $deviceId)
+                    ->exists()
+            ) {
                 $this->invalid(
                     'Apply a referral code before the first save or campaign enrolment.'
                 );
@@ -107,675 +115,1202 @@ class RewardReferralService
                 'claimed' => true,
                 'already_claimed' => false,
             ];
+
         }, 3);
     }
 
-    /**
-     * Find newly qualified referrals and add them to the durable queue.
-     * Existing queue entries are protected by a database unique constraint.
-     */
+    /*
+    |--------------------------------------------------------------------------
+    | Qualify Invited Device
+    |--------------------------------------------------------------------------
+    |
+    | A referral can qualify only once for a particular task.
+    |
+    | The first N accepted saves determine qualification.
+    |
+    | Later saves cannot move an old referral into another cycle.
+    |
+    */
+
     public function qualify(int $invitedDeviceId): array
     {
-        $queued = DB::transaction(function () use ($invitedDeviceId) {
-            $referral = DB::table('reward_referrals')
-                ->where('invited_device_id', $invitedDeviceId)
-                ->where('environment', config('vtpass.environment'))
-                ->first();
+        $referral = DB::table('reward_referrals')
+            ->where('invited_device_id', $invitedDeviceId)
+            ->where('environment', config('vtpass.environment'))
+            ->first();
 
-            if (! $referral) {
-                return [];
-            }
+        if (! $referral) {
+            return [
+                'queued' => 0,
+                'processed' => 0,
+            ];
+        }
 
-            $devices = DB::table('reward_devices')
-                ->whereIn('id', [
-                    $referral->inviter_device_id,
-                    $invitedDeviceId,
-                ])
-                ->orderBy('id')
-                ->lockForUpdate()
-                ->get()
-                ->keyBy('id');
+        $progressIds = DB::table('reward_task_progress as p')
+            ->join(
+                'reward_participants as rp',
+                'rp.id',
+                '=',
+                'p.reward_participant_id'
+            )
+            ->join(
+                'reward_campaigns as c',
+                'c.id',
+                '=',
+                'rp.reward_campaign_id'
+            )
+            ->where(
+                'rp.reward_device_id',
+                $referral->inviter_device_id
+            )
+            ->where(
+                'c.environment',
+                config('vtpass.environment')
+            )
+            ->orderBy('c.id')
+            ->orderBy('p.id')
+            ->pluck('p.id');
 
-            $campaigns = DB::table('reward_campaigns')
-                ->where('environment', config('vtpass.environment'))
-                ->whereIn(
-                    'id',
-                    DB::table('reward_participants')
-                        ->where('reward_device_id', $referral->inviter_device_id)
-                        ->select('reward_campaign_id')
-                )
-                ->orderBy('id')
-                ->lockForUpdate()
-                ->get()
-                ->keyBy('id');
+        $queued = 0;
 
-            
+        foreach ($progressIds as $progressId) {
 
-            
-            $inviter = $devices->get($referral->inviter_device_id);
-            $invited = $devices->get($invitedDeviceId);
-
-            if (
-                ! $inviter || ! $invited
-                || $inviter->blocked_at
-                || $invited->blocked_at
-                || $inviter->archived_at
-                || $invited->archived_at
+            $queued += DB::transaction(function () use (
+                $progressId,
+                $referral,
+                $invitedDeviceId
             ) {
-                return [];
-            }
 
+                $campaignId = DB::table('reward_task_progress as p')
+                    ->join(
+                        'reward_participants as rp',
+                        'rp.id',
+                        '=',
+                        'p.reward_participant_id'
+                    )
+                    ->where('p.id', $progressId)
+                    ->value('rp.reward_campaign_id');
 
-            $progressRows = DB::table('reward_task_progress as progress')
-                ->join(
-                    'reward_participants as participants',
-                    'participants.id',
-                    '=',
-                    'progress.reward_participant_id'
-                )
-                ->where(
-                    'participants.reward_device_id',
-                    $referral->inviter_device_id
-                )
-                ->whereIn(
-                    'participants.reward_campaign_id',
-                    $campaigns->keys()->all()
-                )
-                ->select([
-                    'progress.*',
-                    'participants.reward_campaign_id',
-                    'participants.enrolled_at',
-                    'participants.referral_device_id_floor',
-                ])
-                ->orderBy('progress.id')
-                ->lockForUpdate()
-                ->get();
-
-            $now = now();
-            $queued = [];
-
-            foreach ($progressRows as $progress) {
-                $campaign = $campaigns->get(
-                    $progress->reward_campaign_id
-                );
-
-                if (! $campaign) {
-                    continue;
+                if (! $campaignId) {
+                    return 0;
                 }
 
-                if (! in_array($campaign->status, ['active', 'paused'], true)) {
-                    continue;
-                }
-
-                if (
-                    $campaign->starts_at
-                    && CarbonImmutable::parse($campaign->starts_at)->greaterThan($now)
-                ) {
-                    continue;
-                }
-
-                if (
-                    $campaign->tasks_close_at
-                    && CarbonImmutable::parse($campaign->tasks_close_at)
-                        ->lessThanOrEqualTo($now)
-                ) {
-                    continue;
-                }
-
-                if (
-                    $invitedDeviceId
-                    <= (int) $progress->referral_device_id_floor
-                ) {
-                    continue;
-                }
-
-                if (
-                    CarbonImmutable::parse($referral->attributed_at)
-                        ->lessThan(CarbonImmutable::parse($progress->enrolled_at))
-                ) {
-                    continue;
-                }
-
-                $task = json_decode(
-                    $progress->task_snapshot,
-                    true,
-                    512,
-                    JSON_THROW_ON_ERROR
-                );
-
-                if (($task['type'] ?? null) !== 'referrals') {
-                    continue;
-                }
-
-                $requiredSaves = (int) (
-                    $task['qualification_rules']['required_unique_saves'] ?? 0
-                );
-
-                if ($requiredSaves < 1) {
-                    continue;
-                }
-
-                $alreadyCredited = DB::table('reward_referral_credits')
-                    ->where('reward_task_progress_id', $progress->id)
-                    ->where('reward_referral_id', $referral->id)
-                    ->exists();
-
-                if ($alreadyCredited) {
-                    continue;
-                }
-
-                $saves = DB::table('reward_saved_media')
-                    ->where('reward_device_id', $invitedDeviceId)
-                    ->where('accepted_at', '>=', $referral->attributed_at)
-                    ->where('accepted_at', '>=', $progress->enrolled_at);
-
-                if (($task['media_type'] ?? 'all') !== 'all') {
-                    $saves->where('media_type', $task['media_type']);
-                }
-
-                if (($task['source'] ?? 'all') !== 'all') {
-                    $saves->where('source', $task['source']);
-                }
-
-                if ($saves->count() < $requiredSaves) {
-                    continue;
-                }
-
-                $alreadyQueued = DB::table('reward_referral_qualifications')
-                    ->where('reward_task_progress_id', $progress->id)
-                    ->where('reward_referral_id', $referral->id)
-                    ->exists();
-
-                if ($alreadyQueued) {
-                    continue;
-                }
-
-                DB::table('reward_referral_qualifications')->insert([
-                    'reward_task_progress_id' => $progress->id,
-                    'reward_referral_id' => $referral->id,
-                    'eligible_at' => $now,
-                    'credited_at' => null,
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ]);
-
-                $queued[] = [
-                    'progress_id' => $progress->id,
-                    'referral_id' => $referral->id,
-                ];
-            }
-
-            return $queued;
-        }, 3);
-
-        // Try to process eligible referrals immediately.
-        // The scheduled command will retry any that remain queued.
-        $credited = $this->processPendingQualifications();
-
-        return [
-            'queued' => count($queued),
-            'processed' => $credited,
-        ];
-    }
-
-    /**
-     * Process queued referrals in oldest-first order.
-     * Returns the number of queue entries credited during this run.
-     */
-    
-    public function processPendingQualifications(int $limit = 200): int
-    {
-        $ids = DB::table('reward_referral_qualifications')
-            ->whereNull('credited_at')
-            ->orderBy('eligible_at')
-            ->orderBy('id')
-            ->limit(max(1, min($limit, 1000)))
-            ->pluck('id');
-
-        $processed = 0;
-
-        foreach ($ids as $id) {
-            $wasCredited = DB::transaction(function () use ($id) {
-                $queue = DB::table('reward_referral_qualifications')
-                    ->where('id', $id)
+                $campaign = DB::table('reward_campaigns')
+                    ->where('id', $campaignId)
                     ->lockForUpdate()
                     ->first();
 
-                if (! $queue || $queue->credited_at !== null) {
-                    return false;
+                if (! $this->campaignOpen($campaign)) {
+                    return 0;
                 }
 
-                $referral = DB::table('reward_referrals')
-                    ->where('id', $queue->reward_referral_id)
-                    ->first();
-
-                if (
-                    ! $referral
-                    || $referral->environment !== config('vtpass.environment')
-                ) {
-                    return false;
-                }
-
-                $progressInfo = DB::table('reward_task_progress as progress')
-                    ->join(
-                        'reward_participants as participants',
-                        'participants.id',
-                        '=',
-                        'progress.reward_participant_id'
-                    )
-                    ->where('progress.id', $queue->reward_task_progress_id)
-                    ->select([
-                        'progress.*',
-                        'participants.id as participant_id',
-                        'participants.reward_campaign_id',
-                        'participants.reward_device_id',
-                        'participants.enrolled_at',
-                        'participants.referral_device_id_floor',
-                    ])
-                    ->first();
-
-                if (! $progressInfo) {
-                    return false;
-                }
-
-                if (
-                    (int) $progressInfo->reward_device_id
-                    !== (int) $referral->inviter_device_id
-                    || (int) $referral->invited_device_id
-                    <= (int) $progressInfo->referral_device_id_floor
-                    || CarbonImmutable::parse($referral->attributed_at)
-                        ->lessThan(
-                            CarbonImmutable::parse($progressInfo->enrolled_at)
-                        )
-                ) {
-                    return false;
-                }
-
-                /*
-                * Lock the inviter device first. This serializes processing
-                * for referrals belonging to the same inviter, including
-                * referrals being processed for different campaigns.
-                */
                 $devices = DB::table('reward_devices')
                     ->whereIn('id', [
                         $referral->inviter_device_id,
-                        $referral->invited_device_id,
+                        $invitedDeviceId,
                     ])
                     ->orderBy('id')
                     ->lockForUpdate()
                     ->get()
                     ->keyBy('id');
 
-                $inviter = $devices->get($referral->inviter_device_id);
-                $invited = $devices->get($referral->invited_device_id);
-
-                if (
-                    ! $inviter || ! $invited
-                    || $inviter->blocked_at
-                    || $invited->blocked_at
-                    || $inviter->archived_at
-                    || $invited->archived_at
-                ) {
-                    return false;
+                if (! $this->devicesEligible(
+                    $devices,
+                    (int) $referral->inviter_device_id,
+                    $invitedDeviceId
+                )) {
+                    return 0;
                 }
 
-                $campaign = DB::table('reward_campaigns')
-                    ->where('id', $progressInfo->reward_campaign_id)
-                    ->lockForUpdate()
-                    ->first();
+                $progress = $this->loadProgress($progressId);
 
-                if (
-                    ! $campaign
-                    || $campaign->environment !== config('vtpass.environment')
-                    || ! in_array($campaign->status, ['active', 'paused'], true)
-                ) {
-                    return false;
+                if (! $this->referralEligibleForProgress(
+                    $progress,
+                    $referral
+                )) {
+                    return 0;
                 }
 
-                $now = now();
-
-                if (
-                    $campaign->starts_at
-                    && CarbonImmutable::parse($campaign->starts_at)
-                        ->greaterThan($now)
-                ) {
-                    return false;
-                }
-
-                if (
-                    $campaign->tasks_close_at
-                    && CarbonImmutable::parse($campaign->tasks_close_at)
-                        ->lessThanOrEqualTo($now)
-                ) {
-                    return false;
-                }
-
-                $task = json_decode(
-                    $progressInfo->task_snapshot,
-                    true,
-                    512,
-                    JSON_THROW_ON_ERROR
-                );
+                $task = $this->taskSnapshot($progress);
 
                 if (($task['type'] ?? null) !== 'referrals') {
-                    return false;
+                    return 0;
                 }
 
-                $alreadyCredited = DB::table('reward_referral_credits')
-                    ->where(
-                        'reward_task_progress_id',
-                        $progressInfo->id
-                    )
-                    ->where('reward_referral_id', $referral->id)
-                    ->exists();
+                /*
+                 * An invitee cannot be credited twice
+                 * for the same task, even across cycles.
+                 */
 
-                if ($alreadyCredited) {
+                if (
+                    DB::table('reward_referral_credits')
+                        ->where('reward_task_progress_id', $progressId)
+                        ->where('reward_referral_id', $referral->id)
+                        ->exists()
+                ) {
+                    return 0;
+                }
+
+                /*
+                 * A qualification record is permanent.
+                 *
+                 * This includes discarded qualifications.
+                 * They cannot be requeued in a later cycle.
+                 */
+
+                if (
                     DB::table('reward_referral_qualifications')
-                        ->where('id', $queue->id)
-                        ->update([
-                            'credited_at' => $now,
-                            'updated_at' => $now,
-                        ]);
-
-                    return false;
+                        ->where('reward_task_progress_id', $progressId)
+                        ->where('reward_referral_id', $referral->id)
+                        ->exists()
+                ) {
+                    return 0;
                 }
 
-                $period = $campaign->referral_credit_period ?? 'daily';
-                $creditLimit = (int) ($campaign->referral_credit_limit ?? 15);
+                /*
+                 * Determine the FIRST qualification time.
+                 *
+                 * Do not restart the invitee's save count
+                 * when a new reward cycle begins.
+                 */
 
-                if (! in_array($period, ['daily', 'weekly'], true)) {
-                    $period = 'daily';
+                $qualifiedAt = $this->qualificationTime(
+                    $task,
+                    $referral,
+                    $progress
+                );
+
+                if (! $qualifiedAt) {
+                    return 0;
                 }
 
-                if ($creditLimit < 1) {
-                    $creditLimit = 15;
-                }
+                /*
+                 * IMPORTANT:
+                 *
+                 * Assign the cycle using the original
+                 * qualification timestamp, not the
+                 * current processing time.
+                 */
 
-                $periodStart = CarbonImmutable::now('Africa/Lagos');
+                $cycle = $this->cycleForQualificationTime(
+                    $progress,
+                    $task,
+                    $qualifiedAt
+                );
 
-                if ($period === 'weekly') {
-                    $periodStart = $periodStart->startOfWeek(
-                        \Carbon\CarbonInterface::MONDAY
+                /*
+                 * No eligible cycle, or a cycle that
+                 * has already completed:
+                 *
+                 * Permanently discard the qualification.
+                 *
+                 * Never transfer it to another cycle.
+                 */
+
+                if (
+                    ! $cycle
+                    || $cycle->completed_at !== null
+                    || (int) $cycle->progress_count >=
+                        (int) ($task['target_count'] ?? 0)
+                ) {
+                    $this->storeDiscardedQualification(
+                        $progressId,
+                        (int) $referral->id,
+                        $qualifiedAt,
+                        $cycle ? (int) $cycle->id : null
                     );
-                } else {
-                    $periodStart = $periodStart->startOfDay();
+
+                    return 0;
                 }
 
-                $periodEnd = $period === 'weekly'
-                    ? $periodStart->addWeek()
-                    : $periodStart->addDay();
+                /*
+                 * A referral qualifying during cooldown
+                 * cannot count after cooldown.
+                 */
 
-                $sameReferralCreditedInPeriod = DB::table(
-                    'reward_referral_qualifications as qualifications'
-                )
-                    ->join(
-                        'reward_task_progress as progress',
-                        'progress.id',
-                        '=',
-                        'qualifications.reward_task_progress_id'
-                    )
-                    ->join(
-                        'reward_participants as participants',
-                        'participants.id',
-                        '=',
-                        'progress.reward_participant_id'
-                    )
-                    ->where(
-                        'participants.reward_device_id',
-                        $referral->inviter_device_id
-                    )
-                    ->where(
-                        'participants.reward_campaign_id',
-                        $campaign->id
-                    )
-                    ->where(
-                        'qualifications.reward_referral_id',
-                        $referral->id
-                    )
-                    ->whereNotNull('qualifications.credited_at')
-                    ->where('qualifications.credited_at', '>=', $periodStart)
-                    ->where('qualifications.credited_at', '<', $periodEnd)
-                    ->exists();
+                if (
+                    $cycle->next_available_at !== null
+                    && CarbonImmutable::parse($qualifiedAt)
+                        ->lt(CarbonImmutable::parse(
+                            $cycle->next_available_at
+                        ))
+                ) {
+                    $this->storeDiscardedQualification(
+                        $progressId,
+                        (int) $referral->id,
+                        $qualifiedAt,
+                        (int) $cycle->id
+                    );
 
-                if (! $sameReferralCreditedInPeriod) {
-                    $periodCount = DB::table(
-                        'reward_task_progress as progress'
-                    )
-                        ->join(
-                            'reward_participants as participants',
-                            'participants.id',
-                            '=',
-                            'progress.reward_participant_id'
-                        )
-                        ->join(
-                            'reward_referral_qualifications as qualifications',
-                            'qualifications.reward_task_progress_id',
-                            '=',
-                            'progress.id'
-                        )
-                        ->where(
-                            'participants.reward_device_id',
-                            $referral->inviter_device_id
-                        )
-                        ->where(
-                            'participants.reward_campaign_id',
-                            $campaign->id
-                        )
-                        ->whereNotNull('qualifications.credited_at')
-                        ->where('qualifications.credited_at', '>=', $periodStart)
-                        ->where('qualifications.credited_at', '<', $periodEnd)
-                        ->distinct()
-                        ->count('qualifications.reward_referral_id');
-
-                    if ($periodCount >= $creditLimit) {
-                        // Keep this referral queued for a later processing run.
-                        return false;
-                    }
+                    return 0;
                 }
+
+                /*
+                 * Store the qualification permanently
+                 * against its original eligible cycle.
+                 */
+
                 $now = now();
 
-                DB::table('reward_referral_credits')->insert([
-                    'reward_task_progress_id' => $progressInfo->id,
+                DB::table('reward_referral_qualifications')->insert([
+                    'reward_task_progress_id' => $progressId,
+                    'reward_task_cycle_id' => $cycle->id,
                     'reward_referral_id' => $referral->id,
-                    'qualified_at' => $now,
+                    'eligible_at' => $qualifiedAt,
+                    'credited_at' => null,
+                    'discarded_at' => null,
+                    'created_at' => $now,
+                    'updated_at' => $now,
                 ]);
 
-                DB::table('reward_task_progress')
-                    ->where('id', $progressInfo->id)
-                    ->update([
-                        'progress_count' => DB::raw('progress_count + 1'),
-                        'updated_at' => $now,
-                    ]);
+                return 1;
 
-                DB::table('reward_referral_qualifications')
-                    ->where('id', $queue->id)
-                    ->update([
-                        'credited_at' => $now,
-                        'updated_at' => $now,
-                    ]);
-
-                return true;
             }, 3);
-
-            if ($wasCredited) {
-                $processed++;
-            }
         }
 
-        // Retry milestones that were earned but could not previously be funded.
-        $this->issueFundedReferralMilestones();
-
-        return $processed;
+        return [
+            'queued' => $queued,
+            'processed' => $this->processPendingQualifications(),
+        ];
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | Process Pending Qualifications
+    |--------------------------------------------------------------------------
+    |
+    | Scan pending qualifications chronologically.
+    |
+    | Unfunded qualifications remain pending.
+    |
+    | Cursor pagination prevents unfunded referrals
+    | at the beginning of the queue from blocking
+    | later funded campaigns.
+    |
+    */
 
-    /**
-     * Issue any milestones earned by credited progress, provided the
-     * campaign has sufficient unallocated budget.
-     */
-    
-    public function issueFundedReferralMilestones(): int
+    public function processPendingQualifications(int $limit = 200): int
     {
-        $issued = 0;
+        $limit = max(1, min($limit, 1000));
 
-        $rows = DB::table('reward_task_progress as progress')
-            ->join(
-                'reward_participants as participants',
-                'participants.id',
-                '=',
-                'progress.reward_participant_id'
-            )
-            ->join(
-                'reward_campaigns as campaigns',
-                'campaigns.id',
-                '=',
-                'participants.reward_campaign_id'
-            )
-            ->where('campaigns.environment', config('vtpass.environment'))
-            ->whereIn('campaigns.status', ['active', 'paused'])
-            ->orderBy('campaigns.id')
-            ->orderBy('progress.id')
-            ->select([
-                'progress.id as progress_id',
-                'participants.id as participant_id',
-                'participants.reward_campaign_id',
-            ])
-            ->get();
+        $processed = 0;
 
-        foreach ($rows as $row) {
-            $issued += DB::transaction(function () use ($row) {
-                $now = now();
+        $lastEligibleAt = null;
+        $lastId = 0;
 
-                $campaign = DB::table('reward_campaigns')
-                    ->where('id', $row->reward_campaign_id)
-                    ->lockForUpdate()
-                    ->first();
+        $batchSize = 250;
 
-                if (
-                    ! $campaign
-                    || $campaign->environment !== config('vtpass.environment')
-                    || ! in_array($campaign->status, ['active', 'paused'], true)
+        while ($processed < $limit) {
+
+            $query = DB::table('reward_referral_qualifications')
+                ->whereNull('credited_at')
+                ->whereNull('discarded_at');
+
+            if ($lastEligibleAt !== null) {
+
+                $query->where(function ($q) use (
+                    $lastEligibleAt,
+                    $lastId
                 ) {
-                    return 0;
-                }
 
-                if (
-                    $campaign->starts_at
-                    && CarbonImmutable::parse($campaign->starts_at)
-                        ->greaterThan($now)
-                ) {
-                    return 0;
-                }
+                    $q->where('eligible_at', '>', $lastEligibleAt)
+                        ->orWhere(function ($q) use (
+                            $lastEligibleAt,
+                            $lastId
+                        ) {
 
-                if (
-                    $campaign->tasks_close_at
-                    && CarbonImmutable::parse($campaign->tasks_close_at)
-                        ->lessThanOrEqualTo($now)
-                ) {
-                    return 0;
-                }
+                            $q->where(
+                                'eligible_at',
+                                '=',
+                                $lastEligibleAt
+                            )->where('id', '>', $lastId);
 
-                $progress = DB::table('reward_task_progress')
-                    ->where('id', $row->progress_id)
-                    ->lockForUpdate()
-                    ->first();
+                        });
 
-                if (! $progress) {
-                    return 0;
-                }
+                });
+            }
 
-                $participant = DB::table('reward_participants')
-                    ->where('id', $row->participant_id)
-                    ->lockForUpdate()
-                    ->first();
+            $batch = $query
+                ->orderBy('eligible_at')
+                ->orderBy('id')
+                ->limit($batchSize)
+                ->get(['id', 'eligible_at']);
 
-                if (! $participant) {
-                    return 0;
-                }
+            if ($batch->isEmpty()) {
+                break;
+            }
 
-                $task = json_decode(
-                    $progress->task_snapshot,
-                    true,
-                    512,
-                    JSON_THROW_ON_ERROR
-                );
+            foreach ($batch as $pending) {
 
-                if (($task['type'] ?? null) !== 'referrals') {
-                    return 0;
-                }
+                /*
+                 * Advance the cursor regardless
+                 * of funding availability.
+                 */
 
-                $interval = (int) ($task['target_count'] ?? 0);
-                $maxCost = (int) ($task['max_reward_cost_kobo'] ?? 0);
+                $lastEligibleAt = $pending->eligible_at;
+                $lastId = (int) $pending->id;
 
-                if ($interval < 1 || $maxCost < 1) {
-                    return 0;
-                }
+                $id = (int) $pending->id;
 
-                $milestonesEarned = intdiv(
-                    (int) $progress->progress_count,
-                    $interval
-                );
+                $processed += DB::transaction(function () use ($id) {
 
-                $existingRewards = DB::table('reward_entitlements')
-                    ->where('reward_task_progress_id', $progress->id)
-                    ->count();
+                    $info = DB::table('reward_referral_qualifications as q')
+                        ->join(
+                            'reward_task_progress as p',
+                            'p.id',
+                            '=',
+                            'q.reward_task_progress_id'
+                        )
+                        ->join(
+                            'reward_participants as rp',
+                            'rp.id',
+                            '=',
+                            'p.reward_participant_id'
+                        )
+                        ->where('q.id', $id)
+                        ->select('rp.reward_campaign_id')
+                        ->first();
 
-                $newRewards = 0;
+                    if (! $info) {
+                        return 0;
+                    }
 
-                while ($existingRewards < $milestonesEarned) {
                     /*
-                    * The initial reward was reserved when the participant
-                    * enrolled. Each subsequent reward needs a new reservation.
-                    */
-                    if ($existingRewards > 0) {
-                        $available = (int) $campaign->budget_kobo
-                            - (int) $campaign->allocated_budget_kobo;
+                     * Lock the campaign first.
+                     */
 
-                        if ($available < $maxCost) {
-                            break;
-                        }
+                    $campaign = DB::table('reward_campaigns')
+                        ->where('id', $info->reward_campaign_id)
+                        ->lockForUpdate()
+                        ->first();
 
-                        DB::table('reward_campaigns')
-                            ->where('id', $campaign->id)
-                            ->increment('allocated_budget_kobo', $maxCost);
+                    if (! $this->campaignOpen($campaign)) {
+                        return 0;
+                    }
 
-                        DB::table('reward_participants')
-                            ->where('id', $participant->id)
-                            ->increment('reserved_budget_kobo', $maxCost);
+                    $referralId = DB::table('reward_referral_qualifications')
+                        ->where('id', $id)
+                        ->value('reward_referral_id');
 
-                        $campaign->allocated_budget_kobo =
-                            (int) $campaign->allocated_budget_kobo + $maxCost;
+                    $referral = DB::table('reward_referrals')
+                        ->where('id', $referralId)
+                        ->first();
 
-                        $participant->reserved_budget_kobo =
-                            (int) $participant->reserved_budget_kobo + $maxCost;
+                    if (
+                        ! $referral
+                        || $referral->environment !== config('vtpass.environment')
+                    ) {
+                        return 0;
+                    }
+
+                    $devices = DB::table('reward_devices')
+                        ->whereIn('id', [
+                            $referral->inviter_device_id,
+                            $referral->invited_device_id,
+                        ])
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->get()
+                        ->keyBy('id');
+
+                    if (! $this->devicesEligible(
+                        $devices,
+                        (int) $referral->inviter_device_id,
+                        (int) $referral->invited_device_id
+                    )) {
+                        return 0;
+                    }
+
+                    $queue = DB::table('reward_referral_qualifications')
+                        ->where('id', $id)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if (
+                        ! $queue
+                        || $queue->credited_at !== null
+                        || $queue->discarded_at !== null
+                    ) {
+                        return 0;
+                    }
+
+                    $progress = $this->loadProgress(
+                        (int) $queue->reward_task_progress_id
+                    );
+
+                    if (! $this->referralEligibleForProgress(
+                        $progress,
+                        $referral
+                    )) {
+                        $this->discardQueue($queue->id);
+
+                        return 0;
+                    }
+
+                    $task = $this->taskSnapshot($progress);
+
+                    if (($task['type'] ?? null) !== 'referrals') {
+                        $this->discardQueue($queue->id);
+
+                        return 0;
+                    }
+
+                    /*
+                     * Prevent duplicate referral credit.
+                     */
+
+                    if (
+                        DB::table('reward_referral_credits')
+                            ->where(
+                                'reward_task_progress_id',
+                                $progress->id
+                            )
+                            ->where(
+                                'reward_referral_id',
+                                $referral->id
+                            )
+                            ->exists()
+                    ) {
+                        $this->discardQueue($queue->id);
+
+                        return 0;
+                    }
+
+                    /*
+                     * Never transfer queued referrals
+                     * from one cycle to another.
+                     */
+
+                    $cycle = $this->currentEligibleCycle(
+                        $progress,
+                        $task
+                    );
+
+                    if (
+                        ! $cycle
+                        || (int) $queue->reward_task_cycle_id
+                            !== (int) $cycle->id
+                    ) {
+                        $this->discardQueue($queue->id);
+
+                        return 0;
+                    }
+
+                    /*
+                     * Recalculate original qualification time.
+                     *
+                     * Later saves must not change eligibility.
+                     */
+
+                    $qualifiedAt = $this->qualificationTime(
+                        $task,
+                        $referral,
+                        $progress
+                    );
+
+                    if (
+                        ! $qualifiedAt
+                        || ! CarbonImmutable::parse($qualifiedAt)
+                            ->equalTo(CarbonImmutable::parse(
+                                $queue->eligible_at
+                            ))
+                    ) {
+                        $this->discardQueue($queue->id);
+
+                        return 0;
+                    }
+
+                    /*
+                     * Reject qualifications that occurred
+                     * before the cycle became available.
+                     */
+
+                    if (
+                        $cycle->next_available_at !== null
+                        && CarbonImmutable::parse($qualifiedAt)
+                            ->lt(CarbonImmutable::parse(
+                                $cycle->next_available_at
+                            ))
+                    ) {
+                        $this->discardQueue($queue->id);
+
+                        return 0;
+                    }
+
+                    /*
+                     * Dynamic task configuration.
+                     */
+
+                    $target = (int) ($task['target_count'] ?? 0);
+                    $cost = (int) ($task['max_reward_cost_kobo'] ?? 0);
+
+                    if (
+                        $target < 1
+                        || $cost < 1
+                        || $cycle->completed_at !== null
+                        || (int) $cycle->progress_count >= $target
+                    ) {
+                        $this->discardQueue($queue->id);
+
+                        return 0;
                     }
 
                     $now = now();
 
-                    DB::table('reward_entitlements')->insert([
-                        'public_id' => (string) Str::uuid(),
+                    /*
+                     * Start the cycle only after the full
+                     * reward cost can be reserved.
+                     */
+
+                    if ($cycle->started_at === null) {
+
+                        $availableBudget =
+                            (int) $campaign->budget_kobo
+                            - (int) $campaign->allocated_budget_kobo;
+
+                        /*
+                         * INSUFFICIENT FUNDING POLICY
+                         *
+                         * Keep the qualification pending.
+                         *
+                         * Do not:
+                         * - Discard it.
+                         * - Award progress.
+                         * - Reserve partial funding.
+                         * - Move it into another cycle.
+                         *
+                         * Retry when funding becomes available.
+                         */
+
+                        if ($availableBudget < $cost) {
+                            return 0;
+                        }
+
+                        /*
+                         * Reserve the entire reward cost
+                         * atomically within this transaction.
+                         */
+
+                        DB::table('reward_campaigns')
+                            ->where('id', $campaign->id)
+                            ->increment(
+                                'allocated_budget_kobo',
+                                $cost,
+                                ['updated_at' => $now]
+                            );
+
+                        DB::table('reward_participants')
+                            ->where('id', $progress->participant_id)
+                            ->increment(
+                                'reserved_budget_kobo',
+                                $cost,
+                                ['updated_at' => $now]
+                            );
+
+                        DB::table('reward_task_cycles')
+                            ->where('id', $cycle->id)
+                            ->update([
+                                'started_at' => $now,
+                                'updated_at' => $now,
+                            ]);
+
+                        DB::table('reward_task_progress')
+                            ->where('id', $progress->id)
+                            ->update([
+                                'cycle_number' => $cycle->cycle_number,
+                                'progress_count' => 0,
+                                'completed_at' => null,
+                                'updated_at' => $now,
+                            ]);
+                    }
+
+                    /*
+                     * Credit one unique qualified invitee.
+                     */
+
+                    DB::table('reward_referral_credits')->insert([
                         'reward_task_progress_id' => $progress->id,
-                        'reward_task_cycle_id' => null,
-                        'cycle_number' => 1,
-                        'status' => 'earned',
-                        'max_cost_kobo' => $maxCost,
-                        'bundle_snapshot' => $progress->bundle_snapshot,
-                        'earned_at' => $now,
-                        'delivered_at' => null,
-                        'created_at' => $now,
-                        'updated_at' => $now,
+                        'reward_task_cycle_id' => $cycle->id,
+                        'reward_referral_id' => $referral->id,
+                        'qualified_at' => $qualifiedAt,
                     ]);
 
-                    $existingRewards++;
-                    $newRewards++;
-                }
+                    $next = (int) $cycle->progress_count + 1;
 
-                return $newRewards;
-            }, 3);
+                    $completed = $next >= $target;
+
+                    DB::table('reward_task_cycles')
+                        ->where('id', $cycle->id)
+                        ->update([
+                            'progress_count' => $next,
+                            'completed_at' => $completed ? $now : null,
+                            'updated_at' => $now,
+                        ]);
+
+                    DB::table('reward_task_progress')
+                        ->where('id', $progress->id)
+                        ->update([
+                            'cycle_number' => $cycle->cycle_number,
+                            'progress_count' => $next,
+                            'completed_at' => $completed ? $now : null,
+                            'updated_at' => $now,
+                        ]);
+
+                    DB::table('reward_referral_qualifications')
+                        ->where('id', $queue->id)
+                        ->update([
+                            'credited_at' => $now,
+                            'discarded_at' => null,
+                            'updated_at' => $now,
+                        ]);
+
+                    /*
+                     * Reward completed.
+                     */
+
+                    if ($completed) {
+
+                        DB::table('reward_entitlements')->insert([
+                            'public_id' => (string) Str::uuid(),
+                            'reward_task_progress_id' => $progress->id,
+                            'reward_task_cycle_id' => $cycle->id,
+                            'cycle_number' => $cycle->cycle_number,
+                            'status' => 'earned',
+                            'max_cost_kobo' => $cost,
+                            'bundle_snapshot' => $progress->bundle_snapshot,
+                            'earned_at' => $now,
+                            'delivered_at' => null,
+                            'created_at' => $now,
+                            'updated_at' => $now,
+                        ]);
+
+                        /*
+                         * Create the next cycle for
+                         * recurring referral tasks.
+                         */
+
+                        $frequencyDays = $task['frequency_days'] ?? null;
+
+                        if ($frequencyDays !== null) {
+
+                            $frequencyDays = (int) $frequencyDays;
+
+                            if ($frequencyDays < 1) {
+                                throw new \RuntimeException(
+                                    'Invalid recurring referral frequency.'
+                                );
+                            }
+
+                            DB::table('reward_task_cycles')
+                                ->insertOrIgnore([
+                                    'reward_task_progress_id' => $progress->id,
+                                    'cycle_number' =>
+                                        (int) $cycle->cycle_number + 1,
+                                    'progress_count' => 0,
+                                    'started_at' => null,
+                                    'completed_at' => null,
+                                    'next_available_at' =>
+                                        CarbonImmutable::parse($now)
+                                            ->addDays($frequencyDays),
+                                    'created_at' => $now,
+                                    'updated_at' => $now,
+                                ]);
+                        }
+
+                        /*
+                         * Discard remaining pending referrals
+                         * belonging to the completed cycle.
+                         *
+                         * No carryover into the next cycle.
+                         */
+
+                        DB::table('reward_referral_qualifications')
+                            ->where('reward_task_cycle_id', $cycle->id)
+                            ->whereNull('credited_at')
+                            ->whereNull('discarded_at')
+                            ->update([
+                                'discarded_at' => $now,
+                                'updated_at' => $now,
+                            ]);
+                    }
+
+                    return 1;
+
+                }, 3);
+
+                if ($processed >= $limit) {
+                    break;
+                }
+            }
         }
 
-        return $issued;
+        return $processed;
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Scheduled Pending Referral Retry
+    |--------------------------------------------------------------------------
+    */
+
+    public function issueFundedReferralMilestones(): int
+    {
+        return $this->processPendingQualifications();
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Cycle Assigned by Original Qualification Time
+    |--------------------------------------------------------------------------
+    |
+    | Historical cycles are inspected chronologically.
+    |
+    | A referral cannot be transferred into a later cycle
+    | simply because processing was delayed.
+    |
+    */
+
+    private function cycleForQualificationTime(
+        object $progress,
+        array $task,
+        string $qualifiedAt
+    ): ?object {
+
+        $target = (int) ($task['target_count'] ?? 0);
+
+        if ($target < 1) {
+            return null;
+        }
+
+        $qualified = CarbonImmutable::parse($qualifiedAt);
+
+        if ($qualified->isFuture()) {
+            return null;
+        }
+
+        /*
+         * Preserve historical successor creation.
+         */
+
+        $this->currentEligibleCycle($progress, $task);
+
+        $cycles = DB::table('reward_task_cycles')
+            ->where('reward_task_progress_id', $progress->id)
+            ->orderBy('cycle_number')
+            ->lockForUpdate()
+            ->get();
+
+        foreach ($cycles as $cycle) {
+
+            /*
+             * A qualification predating completion
+             * belongs to that historical cycle.
+             */
+
+            if ($cycle->completed_at !== null) {
+
+                if (
+                    $qualified->lt(
+                        CarbonImmutable::parse(
+                            $cycle->completed_at
+                        )
+                    )
+                ) {
+                    return $cycle;
+                }
+
+                continue;
+            }
+
+            /*
+             * First incomplete cycle.
+             *
+             * The caller checks next_available_at
+             * to reject cooldown qualifications.
+             */
+
+            return $cycle;
+        }
+
+        return null;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Current Eligible Cycle
+    |--------------------------------------------------------------------------
+    */
+
+    private function currentEligibleCycle(
+        object $progress,
+        array $task
+    ): ?object {
+
+        $target = (int) ($task['target_count'] ?? 0);
+
+        if ($target < 1) {
+            return null;
+        }
+
+        $cycle = DB::table('reward_task_cycles')
+            ->where('reward_task_progress_id', $progress->id)
+            ->where('cycle_number', $progress->cycle_number)
+            ->lockForUpdate()
+            ->first();
+
+        if (! $cycle) {
+            throw new \RuntimeException(
+                'Referral task cycle is missing.'
+            );
+        }
+
+        if (
+            $cycle->completed_at !== null
+            || (int) $cycle->progress_count >= $target
+        ) {
+
+            $frequencyDays = $task['frequency_days'] ?? null;
+
+            if ($frequencyDays === null) {
+                return null;
+            }
+
+            $frequencyDays = (int) $frequencyDays;
+
+            if ($frequencyDays < 1) {
+                throw new \RuntimeException(
+                    'Invalid recurring referral frequency.'
+                );
+            }
+
+            if ($cycle->completed_at === null) {
+                throw new \RuntimeException(
+                    'Completed referral cycle has no completion timestamp.'
+                );
+            }
+
+            $nextNumber = (int) $cycle->cycle_number + 1;
+
+            $nextAvailableAt = CarbonImmutable::parse(
+                $cycle->completed_at
+            )->addDays($frequencyDays);
+
+            DB::table('reward_task_cycles')->insertOrIgnore([
+                'reward_task_progress_id' => $progress->id,
+                'cycle_number' => $nextNumber,
+                'progress_count' => 0,
+                'started_at' => null,
+                'completed_at' => null,
+                'next_available_at' => $nextAvailableAt,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            $cycle = DB::table('reward_task_cycles')
+                ->where('reward_task_progress_id', $progress->id)
+                ->where('cycle_number', $nextNumber)
+                ->lockForUpdate()
+                ->first();
+        }
+
+        if (! $cycle) {
+            return null;
+        }
+
+        if (
+            $cycle->completed_at !== null
+            || (int) $cycle->progress_count >= $target
+        ) {
+            return null;
+        }
+
+        /*
+         * Enforce cooldown.
+         */
+
+        if (
+            $cycle->next_available_at !== null
+            && CarbonImmutable::parse(
+                $cycle->next_available_at
+            )->isFuture()
+        ) {
+            return null;
+        }
+
+        return $cycle;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | First Qualification Timestamp
+    |--------------------------------------------------------------------------
+    |
+    | Count the invitee's first N accepted saves.
+    |
+    | Do not restart the count when another cycle begins.
+    |
+    */
+
+    private function qualificationTime(
+        array $task,
+        object $referral,
+        object $progress
+    ): ?string {
+
+        $required = (int) (
+            $task['qualification_rules']['required_unique_saves'] ?? 0
+        );
+
+        if ($required < 1) {
+            return null;
+        }
+
+        $windowStart = CarbonImmutable::parse(
+            $referral->attributed_at
+        );
+
+        if (
+            CarbonImmutable::parse($progress->enrolled_at)
+                ->greaterThan($windowStart)
+        ) {
+            $windowStart = CarbonImmutable::parse(
+                $progress->enrolled_at
+            );
+        }
+
+        $query = DB::table('reward_saved_media')
+            ->where(
+                'reward_device_id',
+                $referral->invited_device_id
+            )
+            ->where('accepted_at', '>=', $windowStart);
+
+        if (($task['media_type'] ?? 'all') !== 'all') {
+            $query->where(
+                'media_type',
+                $task['media_type']
+            );
+        }
+
+        if (($task['source'] ?? 'all') !== 'all') {
+            $query->where(
+                'source',
+                $task['source']
+            );
+        }
+
+        $nth = $query
+            ->orderBy('accepted_at')
+            ->orderBy('id')
+            ->skip($required - 1)
+            ->first(['accepted_at']);
+
+        return $nth
+            ? (string) $nth->accepted_at
+            : null;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Load Task Progress
+    |--------------------------------------------------------------------------
+    */
+
+    private function loadProgress(int $progressId): ?object
+    {
+        return DB::table('reward_task_progress as p')
+            ->join(
+                'reward_participants as rp',
+                'rp.id',
+                '=',
+                'p.reward_participant_id'
+            )
+            ->where('p.id', $progressId)
+            ->select(
+                'p.*',
+                'rp.id as participant_id',
+                'rp.reward_device_id',
+                'rp.enrolled_at',
+                'rp.referral_device_id_floor'
+            )
+            ->lockForUpdate()
+            ->first();
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Referral Eligibility
+    |--------------------------------------------------------------------------
+    */
+
+    private function referralEligibleForProgress(
+        ?object $progress,
+        object $referral
+    ): bool {
+
+        if (! $progress) {
+            return false;
+        }
+
+        if (
+            (int) $progress->reward_device_id
+                !== (int) $referral->inviter_device_id
+        ) {
+            return false;
+        }
+
+        if (
+            (int) $referral->invited_device_id
+                <= (int) $progress->referral_device_id_floor
+        ) {
+            return false;
+        }
+
+        if (
+            CarbonImmutable::parse($referral->attributed_at)
+                ->lt(CarbonImmutable::parse(
+                    $progress->enrolled_at
+                ))
+        ) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Task Snapshot
+    |--------------------------------------------------------------------------
+    */
+
+    private function taskSnapshot(object $progress): array
+    {
+        return json_decode(
+            $progress->task_snapshot,
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Record Discarded Qualification
+    |--------------------------------------------------------------------------
+    */
+
+    private function storeDiscardedQualification(
+        int $progressId,
+        int $referralId,
+        string $qualifiedAt,
+        ?int $cycleId
+    ): void {
+
+        $now = now();
+
+        DB::table('reward_referral_qualifications')
+            ->insertOrIgnore([
+                'reward_task_progress_id' => $progressId,
+                'reward_task_cycle_id' => $cycleId,
+                'reward_referral_id' => $referralId,
+                'eligible_at' => $qualifiedAt,
+                'credited_at' => null,
+                'discarded_at' => $now,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Discard Existing Queue Entry
+    |--------------------------------------------------------------------------
+    */
+
+    private function discardQueue(int $id): void
+    {
+        DB::table('reward_referral_qualifications')
+            ->where('id', $id)
+            ->whereNull('credited_at')
+            ->whereNull('discarded_at')
+            ->update([
+                'discarded_at' => now(),
+                'updated_at' => now(),
+            ]);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Campaign Availability
+    |--------------------------------------------------------------------------
+    */
+
+    private function campaignOpen(?object $campaign): bool
+    {
+        if (
+            ! $campaign
+            || $campaign->environment !== config('vtpass.environment')
+            || ! in_array(
+                $campaign->status,
+                ['active', 'paused'],
+                true
+            )
+        ) {
+            return false;
+        }
+
+        $now = now();
+
+        if (
+            $campaign->starts_at
+            && CarbonImmutable::parse(
+                $campaign->starts_at
+            )->greaterThan($now)
+        ) {
+            return false;
+        }
+
+        if (
+            $campaign->tasks_close_at
+            && CarbonImmutable::parse(
+                $campaign->tasks_close_at
+            )->lessThanOrEqualTo($now)
+        ) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Device Eligibility
+    |--------------------------------------------------------------------------
+    */
+
+    private function devicesEligible(
+        $devices,
+        int $inviterId,
+        int $invitedId
+    ): bool {
+
+        $inviter = $devices->get($inviterId);
+        $invited = $devices->get($invitedId);
+
+        return $inviter
+            && $invited
+            && $inviter->blocked_at === null
+            && $invited->blocked_at === null
+            && $inviter->archived_at === null
+            && $invited->archived_at === null;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Validation
+    |--------------------------------------------------------------------------
+    */
 
     private function invalid(string $message): never
     {
