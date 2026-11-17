@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
+use App\Services\RewardRuntimeService;
 
 class CheckPendingRewards extends Command
 {
@@ -19,12 +20,9 @@ class CheckPendingRewards extends Command
     public function handle(RewardRedemptionService $service): int
     {
         // Matches our current redemption service restrictions.
-        if (
-            ! app()->environment('local', 'testing')
-            || config('vtpass.environment') !== 'sandbox'
-        ) {
+        if (! app(RewardRuntimeService::class)->available()) {
             $this->warn(
-                'Automatic reward checks currently support local sandbox only.'
+                'Rewards are disabled or this environment is not enabled.'
             );
 
             return self::FAILURE;

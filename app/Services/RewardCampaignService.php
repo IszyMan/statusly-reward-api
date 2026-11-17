@@ -11,12 +11,7 @@ class RewardCampaignService
     public function activate(int $campaignId): void
     {
         // Activation is restricted to our current local testing phase.
-        abort_unless(
-            app()->environment('local', 'testing')
-                && config('vtpass.environment') === 'sandbox',
-            403,
-            'Campaign activation currently supports local sandbox testing.'
-        );
+        app(RewardRuntimeService::class)->assertAvailable();
 
         DB::transaction(function () use ($campaignId) {
             $campaign = DB::table('reward_campaigns')
@@ -26,8 +21,10 @@ class RewardCampaignService
 
             abort_unless($campaign, 404, 'Campaign not found.');
 
-            if ($campaign->environment !== 'sandbox') {
-                $this->invalid('Only sandbox campaigns can be activated here.');
+            if ($campaign->environment !== config('vtpass.environment')) {
+                $this->invalid(
+                    'This campaign belongs to a different rewards environment.'
+                );
             }
 
             if ($campaign->status === 'active') {

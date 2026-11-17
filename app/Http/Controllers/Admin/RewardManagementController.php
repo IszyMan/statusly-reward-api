@@ -8,6 +8,7 @@ use Illuminate\Database\Query\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Throwable;
+app(\App\Services\RewardRuntimeService::class)->assertAvailable();
 
 class RewardManagementController extends Controller
 {
@@ -308,23 +309,30 @@ class RewardManagementController extends Controller
             ])
             ->first();
 
-        abort_unless($reward, 404, 'Reward not found.');
+        abort_unless(
+            $reward,
+            404,
+            'Reward not found.'
+        );
+
         abort_unless(
             $reward->redemption_id,
             422,
             'This reward has not been redeemed.'
         );
 
+        app(
+            \App\Services\RewardRuntimeService::class
+        )->assertAvailable();
+
         abort_unless(
-            app()->environment('local', 'testing')
-                && config('vtpass.environment') === 'sandbox'
-                && $reward->environment === 'sandbox',
-            403,
-            'Manual checks currently support local sandbox only.'
+            $reward->environment === config('vtpass.environment'),
+            409,
+            'This reward belongs to a different rewards environment.'
         );
 
         try {
-            // Checks the original reference. Never makes a purchase.
+            // Requery the existing transaction. Never purchase again.
             $result = $service->check(
                 (int) $reward->device_id,
                 $rewardId
@@ -333,9 +341,17 @@ class RewardManagementController extends Controller
             return back()->with(
                 'success',
                 'Transaction checked. Current status: '
-                .$result['status'].'.'
+                    .$result['status'].'.'
             );
         } catch (Throwable $exception) {
+            \Illuminate\Support\Facades\Log::warning(
+                'Administrator reward status check failed.',
+                [
+                    'redemption_id' => $reward->redemption_id,
+                    'exception_type' => class_basename($exception),
+                ]
+            );
+
             return back()->withErrors([
                 'transaction' => 'The status check could not complete. '
                     .'The existing transaction has been preserved.',

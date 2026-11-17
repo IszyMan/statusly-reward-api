@@ -29,6 +29,8 @@ class RewardRedemptionService
             ->first();
 
         if ($existing) {
+            $this->assertRedemptionEnvironment($existing);
+
             $this->checkDestination($existing, $network, $phone);
 
             if ($existing->status === 'delivered') {
@@ -130,6 +132,8 @@ class RewardRedemptionService
                 ->first();
 
             if ($existing) {
+                $this->assertRedemptionEnvironment($existing);
+
                 $this->checkDestination($existing, $network, $phone);
 
                 return [
@@ -263,6 +267,7 @@ class RewardRedemptionService
             ->first();
 
         abort_unless($redemption, 404, 'No redemption exists for this reward.');
+        $this->assertRedemptionEnvironment($redemption);
 
         if ($redemption->status !== 'delivered') {
             try {
@@ -559,12 +564,7 @@ class RewardRedemptionService
 
     private function ensureSandbox(): void
     {
-        abort_unless(
-            app()->environment('local', 'testing')
-                && config('vtpass.environment') === 'sandbox',
-            403,
-            'Redemption currently supports local sandbox testing only.'
-        );
+        app(RewardRuntimeService::class)->assertAvailable();
     }
 
     private function invalid(string $message): never
@@ -572,5 +572,15 @@ class RewardRedemptionService
         throw ValidationException::withMessages([
             'reward' => $message,
         ]);
+    }
+
+    private function assertRedemptionEnvironment(
+        object $redemption
+    ): void {
+        abort_if(
+            $redemption->environment !== $this->vtpass->environment(),
+            409,
+            'This transaction belongs to a different rewards environment.'
+        );
     }
 }

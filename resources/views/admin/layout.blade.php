@@ -617,13 +617,23 @@
                 </a>
 
                 <a
+                    href="{{ route('admin.registered-devices.index') }}"
+                    class="{{ request()->routeIs('admin.registered-devices.*') ? 'active' : '' }}"
+                    @if (request()->routeIs('admin.registered-devices.*'))
+                        aria-current="page"
+                    @endif
+                >
+                    Registered devices
+                </a>
+
+                <a
                     href="{{ route('admin.devices.index') }}"
                     class="{{ request()->routeIs('admin.devices.*') ? 'active' : '' }}"
                     @if (request()->routeIs('admin.devices.*'))
                         aria-current="page"
                     @endif
                 >
-                    Devices & Progress
+                    Devices &amp; Progress
                 </a>
             </nav>
 

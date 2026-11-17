@@ -1,6 +1,10 @@
 <?php
 
 return [
+    'enabled' => env('REWARDS_ENABLED', false),
+
+    'allow_live' => env('REWARDS_ALLOW_LIVE', false),
+    
     'device_hash_key' => env('REWARDS_DEVICE_HASH_KEY'),
 
     'device_token_hours' => 24,

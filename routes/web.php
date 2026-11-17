@@ -2,143 +2,190 @@
 
 use App\Http\Controllers\Admin\AdminController;
 use App\Http\Controllers\Admin\CampaignController;
+use App\Http\Controllers\Admin\CampaignPopupController;
+use App\Http\Controllers\Admin\DeviceAdminController;
+use App\Http\Controllers\Admin\RegisteredDeviceController;
+use App\Http\Controllers\Admin\RewardManagementController;
 use App\Http\Middleware\EnsureRewardAdmin;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\Admin\RewardManagementController;
-use App\Http\Controllers\Admin\DeviceAdminController;
-use App\Http\Controllers\Admin\CampaignPopupController;
 
 Route::get('/', function () {
     return view('welcome');
 });
 
-Route::prefix('admin')->name('admin.')->group(function () {
-    Route::get('/login', [AdminController::class, 'login'])
-        ->name('login');
-
-    Route::post('/login', [AdminController::class, 'authenticate'])
-        ->middleware('throttle:5,1')
-        ->name('authenticate');
-
-    Route::middleware(EnsureRewardAdmin::class)->group(function () {
-        Route::get('/', [AdminController::class, 'dashboard'])
-            ->name('dashboard');
-
-        Route::get('/campaigns', [CampaignController::class, 'index'])
-            ->name('campaigns.index');
-
-        Route::get('/campaigns/create', [CampaignController::class, 'create'])
-            ->name('campaigns.create');
-
-        Route::post('/campaigns', [CampaignController::class, 'store'])
-            ->middleware('throttle:10,1')
-            ->name('campaigns.store');
-
+Route::prefix('admin')
+    ->name('admin.')
+    ->group(function () {
         Route::get(
-            '/campaigns/{campaign}/edit',
-            [CampaignController::class, 'edit']
-        )
-            ->whereNumber('campaign')
-            ->name('campaigns.edit');
-
-        Route::put(
-            '/campaigns/{campaign}',
-            [CampaignController::class, 'update']
-        )
-            ->whereNumber('campaign')
-            ->middleware('throttle:10,1')
-            ->name('campaigns.update');    
-
-        Route::get(
-            '/bundles/{network}',
-            [CampaignController::class, 'bundles']
-        )
-            ->where('network', 'mtn|airtel|glo')
-            ->middleware('throttle:30,1')
-            ->name('bundles.index');
+            '/login',
+            [AdminController::class, 'login']
+        )->name('login');
 
         Route::post(
-            '/campaigns/{campaign}/activate',
-            [CampaignController::class, 'activate']
+            '/login',
+            [AdminController::class, 'authenticate']
         )
-            ->whereNumber('campaign')
-            ->name('campaigns.activate');
+            ->middleware('throttle:5,1')
+            ->name('authenticate');
 
-        
-        Route::post(
-            '/campaigns/{campaign}/visibility',
-            [CampaignController::class, 'toggleVisibility']
-        )
-            ->whereNumber('campaign')
-            ->middleware('throttle:30,1')
-            ->name('campaigns.visibility');
-    
-            
-        Route::get(
-            '/rewards',
-            [RewardManagementController::class, 'rewards']
-        )->name('rewards.index');
+        Route::middleware(EnsureRewardAdmin::class)
+            ->group(function () {
+                Route::get(
+                    '/',
+                    [AdminController::class, 'dashboard']
+                )->name('dashboard');
 
-        Route::post(
-            '/rewards/{rewardId}/check',
-            [RewardManagementController::class, 'check']
-        )
-            ->whereUuid('rewardId')
-            ->middleware('throttle:6,1')
-            ->name('rewards.check');
+                /*
+                 * Campaigns
+                 */
 
-        Route::get(
-            '/devices',
-            [DeviceAdminController::class, 'index']
-        )->name('devices.index');
+                Route::get(
+                    '/campaigns',
+                    [CampaignController::class, 'index']
+                )->name('campaigns.index');
 
-        Route::get(
-            '/devices/{device}',
-            [DeviceAdminController::class, 'show']
-        )
-            ->whereNumber('device')
-            ->name('devices.show');
+                Route::get(
+                    '/campaigns/create',
+                    [CampaignController::class, 'create']
+                )->name('campaigns.create');
 
-        Route::post(
-            '/devices/{device}/reset',
-            [DeviceAdminController::class, 'reset']
-        )
-            ->whereNumber('device')
-            ->name('devices.reset'); 
-            
-        Route::get(
-            '/popups',
-            [CampaignPopupController::class, 'index']
-        )->name('popups.index');
+                Route::post(
+                    '/campaigns',
+                    [CampaignController::class, 'store']
+                )
+                    ->middleware('throttle:10,1')
+                    ->name('campaigns.store');
 
-        Route::get(
-            '/popups/create',
-            [CampaignPopupController::class, 'create']
-        )->name('popups.create');
+                Route::get(
+                    '/campaigns/{campaign}/edit',
+                    [CampaignController::class, 'edit']
+                )
+                    ->whereNumber('campaign')
+                    ->name('campaigns.edit');
 
-        Route::post(
-            '/popups',
-            [CampaignPopupController::class, 'store']
-        )
-            ->middleware('throttle:10,1')
-            ->name('popups.store');
+                Route::put(
+                    '/campaigns/{campaign}',
+                    [CampaignController::class, 'update']
+                )
+                    ->whereNumber('campaign')
+                    ->middleware('throttle:10,1')
+                    ->name('campaigns.update');
 
-        Route::get(
-            '/popups/{popup}/edit',
-            [CampaignPopupController::class, 'edit']
-        )
-            ->whereNumber('popup')
-            ->name('popups.edit');
+                Route::get(
+                    '/bundles/{network}',
+                    [CampaignController::class, 'bundles']
+                )
+                    ->where('network', 'mtn|airtel|glo')
+                    ->middleware('throttle:30,1')
+                    ->name('bundles.index');
 
-        Route::put(
-            '/popups/{popup}',
-            [CampaignPopupController::class, 'update']
-        )
-            ->whereNumber('popup')
-            ->middleware('throttle:10,1')
-            ->name('popups.update');   
+                Route::post(
+                    '/campaigns/{campaign}/activate',
+                    [CampaignController::class, 'activate']
+                )
+                    ->whereNumber('campaign')
+                    ->name('campaigns.activate');
 
-        Route::post('/logout', [AdminController::class, 'logout'])
-            ->name('logout');
+                Route::post(
+                    '/campaigns/{campaign}/visibility',
+                    [CampaignController::class, 'toggleVisibility']
+                )
+                    ->whereNumber('campaign')
+                    ->middleware('throttle:30,1')
+                    ->name('campaigns.visibility');
+
+                /*
+                 * Rewards and transactions
+                 */
+
+                Route::get(
+                    '/rewards',
+                    [RewardManagementController::class, 'rewards']
+                )->name('rewards.index');
+
+                Route::post(
+                    '/rewards/{rewardId}/check',
+                    [RewardManagementController::class, 'check']
+                )
+                    ->whereUuid('rewardId')
+                    ->middleware('throttle:6,1')
+                    ->name('rewards.check');
+
+                /*
+                 * All registered devices
+                 */
+
+                Route::get(
+                    '/registered-devices',
+                    [RegisteredDeviceController::class, 'index']
+                )->name('registered-devices.index');
+
+                /*
+                 * Campaign devices and progress
+                 */
+
+                Route::get(
+                    '/devices',
+                    [DeviceAdminController::class, 'index']
+                )->name('devices.index');
+
+                Route::get(
+                    '/devices/{device}',
+                    [DeviceAdminController::class, 'show']
+                )
+                    ->whereNumber('device')
+                    ->name('devices.show');
+
+                Route::post(
+                    '/devices/{device}/reset',
+                    [DeviceAdminController::class, 'reset']
+                )
+                    ->whereNumber('device')
+                    ->name('devices.reset');
+
+                /*
+                 * Campaign popups
+                 */
+
+                Route::get(
+                    '/popups',
+                    [CampaignPopupController::class, 'index']
+                )->name('popups.index');
+
+                Route::get(
+                    '/popups/create',
+                    [CampaignPopupController::class, 'create']
+                )->name('popups.create');
+
+                Route::post(
+                    '/popups',
+                    [CampaignPopupController::class, 'store']
+                )
+                    ->middleware('throttle:10,1')
+                    ->name('popups.store');
+
+                Route::get(
+                    '/popups/{popup}/edit',
+                    [CampaignPopupController::class, 'edit']
+                )
+                    ->whereNumber('popup')
+                    ->name('popups.edit');
+
+                Route::put(
+                    '/popups/{popup}',
+                    [CampaignPopupController::class, 'update']
+                )
+                    ->whereNumber('popup')
+                    ->middleware('throttle:10,1')
+                    ->name('popups.update');
+
+                /*
+                 * Logout
+                 */
+
+                Route::post(
+                    '/logout',
+                    [AdminController::class, 'logout']
+                )->name('logout');
+            });
     });
-});
