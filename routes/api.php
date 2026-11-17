@@ -8,10 +8,18 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\RewardSaveController;
 use App\Http\Controllers\Api\RewardReferralController;
 use App\Http\Controllers\Api\RewardRedemptionController;
+use App\Http\Controllers\Api\RewardAvailabilityController;
+use App\Http\Middleware\EnsureNigerianRewardCountry;
 
 Route::prefix('rewards')
     ->middleware(EnsureLocalRewardSandbox::class)
     ->group(function () {
+
+        Route::get(
+            '/availability',
+            [RewardAvailabilityController::class, 'show']
+        )->middleware('throttle:60,1');
+
         Route::post(
             '/devices/register',
             [RewardDeviceController::class, 'register']
@@ -34,7 +42,7 @@ Route::prefix('rewards')
             Route::post(
                 '/campaigns/{campaignCode}/join',
                 [RewardCampaignController::class, 'join']
-            );
+            )->middleware(EnsureNigerianRewardCountry::class);
 
             Route::get(
                 '/enrolments',
@@ -44,12 +52,12 @@ Route::prefix('rewards')
             Route::post(
                 '/saves',
                 [RewardSaveController::class, 'store']
-            );
+            )->middleware(EnsureNigerianRewardCountry::class);
 
             Route::post(
                 '/referrals/claim',
                 [RewardReferralController::class, 'claim']
-            );
+            )->middleware(EnsureNigerianRewardCountry::class);
 
             Route::post(
                 '/rewards/{rewardId}/redeem',

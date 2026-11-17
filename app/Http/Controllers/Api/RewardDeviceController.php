@@ -9,12 +9,14 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use RuntimeException;
+use App\Services\RewardCountryService;
 
 class RewardDeviceController extends Controller
 {
     public function register(
         Request $request,
-        RewardReferralService $referrals
+        RewardReferralService $referrals,
+        RewardCountryService $countries
     ) {
         $data = $request->validate([
             'android_id' => [
@@ -56,12 +58,16 @@ class RewardDeviceController extends Controller
             (int) config('rewards.device_token_hours', 24)
         );
 
+        $availability = $countries->availability($request);
+        $canAttributeReferral = $availability['rewards_available'];
+
         $result = DB::transaction(function () use (
             $deviceHash,
             $token,
             $expiresAt,
             $installReferralCode,
-            $referrals
+            $referrals,
+            $canAttributeReferral
         ) {
             $now = now();
 
@@ -116,7 +122,14 @@ class RewardDeviceController extends Controller
                 'claimed' => false,
             ];
 
-            if ($installReferralCode !== '') {
+            if ($installReferralCode !== '' && ! $canAttributeReferral) {
+                $attribution = [
+                    'status' => 'country_ineligible',
+                    'claimed' => false,
+                ];
+            }
+
+            if ($installReferralCode !== '' && $canAttributeReferral) {
                 try {
                     // Record attribution only.
                     // Qualification remains in the existing save flow.
@@ -175,6 +188,8 @@ class RewardDeviceController extends Controller
             'referral_attribution' => $result['referral_attribution'],
             'token' => $token,
             'token_expires_at' => $expiresAt->toIso8601String(),
+            'rewards_available' => $availability['rewards_available'],
+            'country_code' => $availability['country_code'],
         ]);
     }
 
